@@ -10,33 +10,98 @@ use Throwable;
 
 class KafkaConsumerService
 {
+    private const STATUS_SUCCESS = 'success';
+
+    private const STATUS_FAILED = 'failed';
+
+    private const STATUS_RECONSUMED_SUCCESS = 'reconsumed_success';
+
+    /**
+     * Process a single Kafka message for the given topic.
+     */
     public function handle(string $topicName, array $payload, array $metadata = []): ?KafkaConsumeLog
     {
-        $topic = KafkaTopic::query()->where('topic', $topicName)->where('is_active', true)->first();
+        $topicConfig = KafkaTopic::query()->where('topic', $topicName)
+            ->where('is_active', true)
+            ->first();
 
-        if (! $topic) {
-            Log::warning("KafkaConsumer: no active topic config [{$topicName}]");
+        if (! $topicConfig) {
+            Log::warning("KafkaConsumer: no active config for topic [{$topicName}]");
             return null;
         }
 
-        $this->touchHeartbeat($topic);
+        return $this->processFreshMessage($topicConfig, $payload, $metadata);
+    }
+
+    /**
+     * Re-consume retryable failed logs for one topic.
+     *
+     * @return array{attempted:int,success:int,failed:int}
+     */
+    public function reconsumeFailedMessages(KafkaTopic $topic, int $limit = 50): array
+    {
+        $limit = min(max($limit, 1), 500);
+        $attempted = 0;
+        $success = 0;
+        $failed = 0;
+
+        $logs = $topic->logs()
+            ->where('status', self::STATUS_FAILED)
+            ->where('retryable', true)
+            ->where(function ($query): void {
+                $query->whereNull('next_retry_at')
+                    ->orWhere('next_retry_at', '<=', now());
+            })
+            ->orderBy('consumed_at')
+            ->limit($limit)
+            ->get();
+
+        foreach ($logs as $log) {
+            $attempted++;
+            $wasSuccess = $this->processReconsumeAttempt($topic, $log);
+
+            if ($wasSuccess) {
+                $success++;
+            } else {
+                $failed++;
+            }
+        }
+
+        return [
+            'attempted' => $attempted,
+            'success' => $success,
+            'failed' => $failed,
+        ];
+    }
+
+    public function reconsumeLog(KafkaConsumeLog $failedLog): bool
+    {
+        $topic = $failedLog->topic;
+
+        if (! $topic || ! $topic->is_active) {
+            return false;
+        }
+
+        if ($failedLog->status !== self::STATUS_FAILED || ! $failedLog->retryable) {
+            return false;
+        }
+
+        return $this->processReconsumeAttempt($topic, $failedLog);
+    }
+
+    private function processFreshMessage(KafkaTopic $topicConfig, array $payload, array $metadata = []): KafkaConsumeLog
+    {
+        $this->touchHeartbeat($topicConfig);
 
         try {
-            $upsertValue = $this->processPayload($topic, $payload);
-
-            $topic->increment('messages_consumed');
-            $topic->update([
-                'last_consumed_at' => now(),
-                'consumer_last_heartbeat_at' => now(),
-                'consumer_last_error' => null,
-                'consumer_lag_seconds' => 0,
-            ]);
+            $upsertValue = $this->processPayload($topicConfig, $payload);
+            $this->markTopicSuccess($topicConfig, isReconsume: false);
 
             return KafkaConsumeLog::create([
-                'kafka_topic_id' => $topic->id,
-                'status' => 'success',
+                'kafka_topic_id' => $topicConfig->id,
+                'status' => self::STATUS_SUCCESS,
                 'attempt_count' => 1,
-                'upsert_key_value' => $upsertValue,
+                'upsert_key_value' => (string) $upsertValue,
                 'payload' => $payload,
                 'consumed_at' => now(),
                 'last_attempt_at' => now(),
@@ -46,27 +111,26 @@ class KafkaConsumerService
                 'kafka_key' => isset($metadata['kafka_key']) ? (string) $metadata['kafka_key'] : null,
             ]);
         } catch (Throwable $e) {
-            $attempt = 1;
-            $retryable = $attempt < (int) ($topic->max_reconsume_attempts ?: config('kafka-consumer.max_reconsume_attempts', 3));
-            $backoff = max(5, (int) ($topic->retry_backoff_seconds ?: config('kafka-consumer.retry_backoff_seconds', 60)));
+            $retryable = $this->isRetryable(1, $topicConfig);
+            $nextRetryAt = $this->resolveNextRetryAt($topicConfig, 1, $retryable);
 
-            $topic->increment('messages_failed');
-            $topic->update([
-                'consumer_last_error' => $e->getMessage(),
-                'consumer_last_heartbeat_at' => now(),
-                'consumer_lag_seconds' => $this->resolveLag($topic),
+            $this->markTopicFailure($topicConfig, $e->getMessage());
+
+            Log::error("KafkaConsumer: failed processing [{$topicConfig->topic}]: {$e->getMessage()}", [
+                'payload' => $payload,
             ]);
 
             return KafkaConsumeLog::create([
-                'kafka_topic_id' => $topic->id,
-                'status' => 'failed',
-                'attempt_count' => $attempt,
+                'kafka_topic_id' => $topicConfig->id,
+                'status' => self::STATUS_FAILED,
+                'attempt_count' => 1,
                 'payload' => $payload,
                 'error' => $e->getMessage(),
                 'consumed_at' => now(),
                 'last_attempt_at' => now(),
-                'next_retry_at' => $retryable ? now()->addSeconds($backoff) : null,
+                'next_retry_at' => $nextRetryAt,
                 'retryable' => $retryable,
+                'is_reconsumed' => false,
                 'kafka_partition' => $metadata['kafka_partition'] ?? null,
                 'kafka_offset' => $metadata['kafka_offset'] ?? null,
                 'kafka_key' => isset($metadata['kafka_key']) ? (string) $metadata['kafka_key'] : null,
@@ -74,122 +138,224 @@ class KafkaConsumerService
         }
     }
 
-    public function reconsumeFailedMessages(KafkaTopic $topic, int $limit = 50): array
+    /**
+     * Re-run a failed log entry and update its retry state.
+     */
+    private function processReconsumeAttempt(KafkaTopic $topic, KafkaConsumeLog $failedLog): bool
     {
-        $attempted = 0;
-        $success = 0;
-        $failed = 0;
+        $attempt = max(2, ((int) $failedLog->attempt_count) + 1);
 
-        $logs = $topic->logs()
-            ->where('status', 'failed')
-            ->where('retryable', true)
-            ->where(fn ($q) => $q->whereNull('next_retry_at')->orWhere('next_retry_at', '<=', now()))
-            ->orderBy('consumed_at')
-            ->limit(max(1, min(500, $limit)))
-            ->get();
+        $failedLog->update([
+            'attempt_count' => $attempt,
+            'last_attempt_at' => now(),
+            'is_reconsumed' => true,
+        ]);
 
-        foreach ($logs as $log) {
-            $attempted++;
-            $attempt = ((int) $log->attempt_count) + 1;
+        $payload = is_array($failedLog->payload) ? $failedLog->payload : [];
+        $this->touchHeartbeat($topic);
 
-            try {
-                $this->processPayload($topic, is_array($log->payload) ? $log->payload : []);
+        try {
+            $upsertValue = $this->processPayload($topic, $payload);
 
-                $topic->increment('messages_consumed');
-                $topic->increment('messages_reconsumed');
-                $topic->update([
-                    'last_consumed_at' => now(),
-                    'consumer_last_heartbeat_at' => now(),
-                    'consumer_last_error' => null,
-                    'consumer_lag_seconds' => 0,
-                ]);
+            $this->markTopicSuccess($topic, isReconsume: true);
 
-                $log->update([
-                    'status' => 'reconsumed_success',
-                    'attempt_count' => $attempt,
-                    'last_attempt_at' => now(),
-                    'retryable' => false,
-                    'next_retry_at' => null,
-                    'resolved_at' => now(),
-                    'is_reconsumed' => true,
-                    'error' => null,
-                ]);
+            $failedLog->update([
+                'status' => self::STATUS_RECONSUMED_SUCCESS,
+                'upsert_key_value' => $upsertValue,
+                'error' => null,
+                'next_retry_at' => null,
+                'retryable' => false,
+                'resolved_at' => now(),
+            ]);
 
-                $success++;
-            } catch (Throwable $e) {
-                $max = (int) ($topic->max_reconsume_attempts ?: config('kafka-consumer.max_reconsume_attempts', 3));
-                $retryable = $attempt < $max;
-                $backoff = max(5, (int) ($topic->retry_backoff_seconds ?: config('kafka-consumer.retry_backoff_seconds', 60)));
+            return true;
+        } catch (Throwable $e) {
+            $retryable = $this->isRetryable($attempt, $topic);
+            $nextRetryAt = $this->resolveNextRetryAt($topic, $attempt, $retryable);
 
-                $topic->increment('messages_failed');
-                $topic->update([
-                    'consumer_last_error' => $e->getMessage(),
-                    'consumer_last_heartbeat_at' => now(),
-                    'consumer_lag_seconds' => $this->resolveLag($topic),
-                ]);
+            $this->markTopicFailure($topic, $e->getMessage());
 
-                $log->update([
-                    'attempt_count' => $attempt,
-                    'last_attempt_at' => now(),
-                    'retryable' => $retryable,
-                    'next_retry_at' => $retryable ? now()->addSeconds($backoff * max(1, $attempt - 1)) : null,
-                    'is_reconsumed' => true,
-                    'error' => $e->getMessage(),
-                ]);
+            $failedLog->update([
+                'status' => self::STATUS_FAILED,
+                'error' => $e->getMessage(),
+                'next_retry_at' => $nextRetryAt,
+                'retryable' => $retryable,
+            ]);
 
-                $failed++;
-            }
+            Log::warning("KafkaConsumer: re-consume failed [{$topic->topic}] log={$failedLog->id}: {$e->getMessage()}");
+
+            return false;
         }
-
-        return compact('attempted', 'success', 'failed');
     }
 
-    private function processPayload(KafkaTopic $topic, array $payload): string
+    /**
+     * Run mapping + upsert + relation sync and return the resolved upsert key value.
+     */
+    private function processPayload(KafkaTopic $topicConfig, array $payload): string
     {
-        $data = collect($payload)->except($topic->exclude_keys ?? [])->all();
+        $excluded = $topicConfig->exclude_keys ?? [];
+        $data = collect($payload)->except($excluded)->all();
 
+        $fieldMap = $topicConfig->resolvedFieldMap();
         $mapped = [];
-        foreach ($topic->resolvedFieldMap() as $from => $to) {
+        foreach ($fieldMap as $from => $to) {
             if (array_key_exists($from, $data)) {
                 $mapped[$to] = $data[$from];
             }
         }
 
-        $upsertKey = $topic->upsert_key;
-        $upsertValue = $mapped[$upsertKey] ?? $data[$upsertKey] ?? $data['uuid'] ?? $data['id'] ?? null;
+        $upsertKey = $topicConfig->upsert_key;
+        $upsertValue = $mapped[$upsertKey]
+            ?? $data[$upsertKey]
+            ?? $data['uuid']
+            ?? $data['id']
+            ?? null;
 
-        if (! $upsertValue) {
-            throw new \RuntimeException("Upsert key [{$upsertKey}] missing from payload/mapping.");
+        if (! isset($mapped[$upsertKey]) && isset($upsertValue)) {
+            $mapped[$upsertKey] = $upsertValue;
         }
 
-        $modelClass = $topic->model_class;
+        $modelClass = $topicConfig->model_class;
 
         if (! class_exists($modelClass)) {
             throw new \RuntimeException("Model class [{$modelClass}] does not exist.");
         }
 
-        if (! isset($mapped[$upsertKey])) {
-            $mapped[$upsertKey] = $upsertValue;
+        if (empty($upsertValue)) {
+            throw new \RuntimeException(
+                "Upsert key [{$upsertKey}] not found in mapped payload or raw payload. " .
+                "Check the field_map and upsert_key configuration for this topic."
+            );
         }
 
-        /** @var Model $modelClass */
-        $modelClass::query()->updateOrCreate([$upsertKey => $upsertValue], $mapped);
+        /** @var Model $record */
+        $record = $modelClass::query()->updateOrCreate(
+            [$upsertKey => $upsertValue],
+            $mapped
+        );
+
+        $this->syncRelations($record, $topicConfig->relations ?? [], $payload);
 
         return (string) $upsertValue;
     }
 
-    private function touchHeartbeat(KafkaTopic $topic): void
+    /**
+     * Sync BelongsToMany relationships from nested arrays in the payload.
+     */
+    private function syncRelations(Model $record, array $relations, array $payload): void
     {
+        foreach ($relations as $rel) {
+            $payloadKey = $rel['payload_key'] ?? null;
+            $relationship = $rel['relationship'] ?? null;
+            $relatedClass = $rel['related_model'] ?? null;
+            $lookupKey = $rel['related_lookup_key'] ?? null;
+            $relatedModelKey = $rel['related_model_key'] ?? null;
+
+            if (! $payloadKey || ! $relationship || ! $relatedClass) {
+                Log::warning('KafkaConsumer: incomplete relation config — skipping.', ['rel' => $rel]);
+                continue;
+            }
+
+            if (! isset($payload[$payloadKey]) || ! is_array($payload[$payloadKey])) {
+                continue;
+            }
+
+            if (! method_exists($record, $relationship)) {
+                Log::warning('KafkaConsumer: relationship [' . $relationship . '] not found on ' . get_class($record));
+                continue;
+            }
+
+            /** @var Model $relatedInstance */
+            $relatedInstance = new $relatedClass;
+            $relatedPk = $relatedModelKey ?? $relatedInstance->getKeyName();
+
+            $relatedIds = [];
+
+            foreach ($payload[$payloadKey] as $item) {
+                if (! is_array($item)) {
+                    continue;
+                }
+
+                $lookupValue = null;
+
+                if ($lookupKey && isset($item[$lookupKey])) {
+                    $lookupValue = $item[$lookupKey];
+                } else {
+                    $lookupValue = $item['uuid'] ?? $item['id'] ?? null;
+                }
+
+                if (empty($lookupValue)) {
+                    continue;
+                }
+
+                $relatedId = $relatedClass::query()->where($relatedPk, $lookupValue)->value($relatedPk);
+
+                if ($relatedId !== null) {
+                    $relatedIds[] = $relatedId;
+                }
+            }
+
+            $record->{$relationship}()->sync($relatedIds);
+        }
+    }
+
+    private function markTopicSuccess(KafkaTopic $topic, bool $isReconsume): void
+    {
+        $topic->increment('messages_consumed');
+
+        if ($isReconsume) {
+            $topic->increment('messages_reconsumed');
+        }
+
         $topic->update([
+            'last_consumed_at' => now(),
             'consumer_last_heartbeat_at' => now(),
-            'consumer_lag_seconds' => $this->resolveLag($topic),
+            'consumer_last_error' => null,
+            'consumer_lag_seconds' => 0,
         ]);
     }
 
-    private function resolveLag(KafkaTopic $topic): ?int
+    private function markTopicFailure(KafkaTopic $topic, string $error): void
+    {
+        $topic->increment('messages_failed');
+
+        $lag = $topic->last_consumed_at?->diffInSeconds(now());
+        $lag = $lag !== null ? (int) floor($lag) : null;
+
+        $topic->update([
+            'consumer_last_heartbeat_at' => now(),
+            'consumer_last_error' => $error,
+            'consumer_lag_seconds' => $lag,
+        ]);
+    }
+
+    private function touchHeartbeat(KafkaTopic $topic): void
     {
         $lag = $topic->last_consumed_at?->diffInSeconds(now());
+        $lag = $lag !== null ? (int) floor($lag) : null;
 
-        return $lag === null ? null : (int) floor($lag);
+        $topic->update([
+            'consumer_last_heartbeat_at' => now(),
+            'consumer_lag_seconds' => $lag,
+        ]);
+    }
+
+    private function isRetryable(int $attemptCount, KafkaTopic $topic): bool
+    {
+        $maxAttempts = max(1, (int) ($topic->max_reconsume_attempts ?? 3));
+
+        return $attemptCount < $maxAttempts;
+    }
+
+    private function resolveNextRetryAt(KafkaTopic $topic, int $attemptCount, bool $retryable): ?\Illuminate\Support\Carbon
+    {
+        if (! $retryable) {
+            return null;
+        }
+
+        $backoffSeconds = max(5, (int) ($topic->retry_backoff_seconds ?? 60));
+        $delay = $backoffSeconds * max(1, $attemptCount - 1);
+
+        return now()->addSeconds($delay);
     }
 }
