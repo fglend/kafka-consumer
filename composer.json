@@ -1,0 +1,40 @@
+{
+    "name": "gurento/kafka-consumer",
+    "description": "Laravel Kafka consumer module with topic mapping, retry tracking, and operational logs.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "laravel",
+        "kafka",
+        "consumer"
+    ],
+    "require": {
+        "php": "^8.2",
+        "illuminate/support": "^11.0|^12.0",
+        "illuminate/database": "^11.0|^12.0",
+        "illuminate/console": "^11.0|^12.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^9.0|^10.0",
+        "phpunit/phpunit": "^10.0|^11.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Gurento\\KafkaConsumer\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Gurento\\KafkaConsumer\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Gurento\\KafkaConsumer\\KafkaSyncServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
