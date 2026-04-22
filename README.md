@@ -7,6 +7,7 @@ Laravel package for Kafka topic consumption with:
 - consume logs
 - failed-message retry / re-consume tracking
 - consumer heartbeat and lag counters
+- built-in laravel-kafka consumer engine (plug and play)
 
 ## Installation
 
@@ -28,7 +29,7 @@ Insert rows into `kafka_topics` with:
 
 ## Consume
 
-Bind `Gurento\KafkaConsumer\Contracts\ConsumerEngine` in your host app, then run:
+Run normal consumption:
 
 ```bash
 php artisan kafka:consume
@@ -44,6 +45,14 @@ Retry failed logs:
 
 ```bash
 php artisan kafka:consume --reconsume-failed --reconsume-limit=100
+```
+
+## Custom Engine (Optional)
+
+If you need a different Kafka transport implementation, override the default binding in your host app:
+
+```php
+$this->app->singleton(\Gurento\KafkaConsumer\Contracts\ConsumerEngine::class, YourEngine::class);
 ```
 
 ## In-App Service Usage

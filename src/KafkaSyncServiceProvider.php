@@ -3,6 +3,8 @@
 namespace Gurento\KafkaConsumer;
 
 use Gurento\KafkaConsumer\Console\Commands\ConsumeKafkaCommand;
+use Gurento\KafkaConsumer\Contracts\ConsumerEngine;
+use Gurento\KafkaConsumer\Engines\LaravelKafkaConsumerEngine;
 use Illuminate\Support\ServiceProvider;
 
 class KafkaSyncServiceProvider extends ServiceProvider
@@ -10,6 +12,9 @@ class KafkaSyncServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->mergeConfigFrom(__DIR__ . '/../config/kafka-consumer.php', 'kafka-consumer');
+
+        // Plug-and-play default engine based on mateusjunges/laravel-kafka.
+        $this->app->singleton(ConsumerEngine::class, LaravelKafkaConsumerEngine::class);
     }
 
     public function boot(): void
