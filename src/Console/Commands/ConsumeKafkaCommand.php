@@ -9,7 +9,7 @@ use Illuminate\Console\Command;
 
 class ConsumeKafkaCommand extends Command
 {
-    protected $signature = 'kafka:consume
+    protected $signature = 'gurento:kafka-consume
         {--topics=* : Topic names to consume}
         {--limit=0 : Max messages for this run}
         {--from-beginning : Start from earliest offsets}
@@ -51,7 +51,7 @@ class ConsumeKafkaCommand extends Command
 
         if (! $this->laravel->bound(ConsumerEngine::class)) {
             $this->warn('No ConsumerEngine binding found.');
-            $this->line('Bind ' . ConsumerEngine::class . ' in your host app and call kafka:consume again.');
+            $this->line('Bind ' . ConsumerEngine::class . ' in your host app and call gurento:kafka-consume again.');
             $this->line('Requested offset reset: ' . ($fromBeginning ? 'earliest' : 'latest'));
             return self::FAILURE;
         }

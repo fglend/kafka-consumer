@@ -32,19 +32,19 @@ Insert rows into `kafka_topics` with:
 Run normal consumption:
 
 ```bash
-php artisan kafka:consume
+php artisan gurento:kafka-consume
 ```
 
 Consume from earliest offsets:
 
 ```bash
-php artisan kafka:consume --from-beginning
+php artisan gurento:kafka-consume --from-beginning
 ```
 
 Retry failed logs:
 
 ```bash
-php artisan kafka:consume --reconsume-failed --reconsume-limit=100
+php artisan gurento:kafka-consume --reconsume-failed --reconsume-limit=100
 ```
 
 ## Custom Engine (Optional)
