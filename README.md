@@ -53,6 +53,20 @@ This creates two tables:
 - `kafka_topics` — topic config, counters, and health metadata
 - `kafka_consume_logs` — per-message processing logs
 
+### Environment
+
+Add your Kafka connection settings to `.env`:
+
+```dotenv
+KAFKA_BROKERS=localhost:9092
+KAFKA_CONSUMER_GROUP_ID=app-consumer
+KAFKA_DEBUG=false
+```
+
+- `KAFKA_BROKERS` — comma-separated broker list (host:port)
+- `KAFKA_CONSUMER_GROUP_ID` — default consumer group used when `--group` is not passed
+- `KAFKA_DEBUG` — set to `true` to enable verbose librdkafka debug output while troubleshooting
+
 ## Quick Start
 
 1. Create a topic configuration (via seeder, tinker, or the Filament UI).
