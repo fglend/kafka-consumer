@@ -1,34 +1,43 @@
 # Kafka Consumer
 
-`gurento/kafka-consumer` is a Laravel package for consuming Kafka messages and writing them into Eloquent models using configurable topic mappings.
+[![Latest Version on Packagist](https://img.shields.io/packagist/v/gurento/kafka-consumer.svg?style=flat-square)](https://packagist.org/packages/gurento/kafka-consumer)
+[![Total Downloads](https://img.shields.io/packagist/dt/gurento/kafka-consumer.svg?style=flat-square)](https://packagist.org/packages/gurento/kafka-consumer)
+[![License](https://img.shields.io/github/license/gurento/kafka-consumer?style=flat-square)](LICENSE)
 
-It is built for operations teams that need:
+A Laravel package for consuming Kafka messages and writing them into Eloquent models using **declarative, database-driven topic mappings** — no per-topic consumer classes required.
+
+Built for operations teams that need:
 
 - declarative topic-to-model mapping
 - safe `updateOrCreate` upserts
 - failed-message tracking and re-consume flows
-- operational counters and heartbeat metadata
+- operational counters, health, and heartbeat metadata
 - command-driven workflow for normal consume and replay
 
-The package ships with a default engine based on `mateusjunges/laravel-kafka`, so it works out of the box.
+Ships with a default engine based on [`mateusjunges/laravel-kafka`](https://github.com/mateusjunges/laravel-kafka), so it works out of the box.
+
+> **Admin UI available:** install [`gurento/kafka-consumer-filament`](https://packagist.org/packages/gurento/kafka-consumer-filament) for a full Filament panel — topic CRUD, live health monitoring, and one-click replay.
 
 ## Features
 
-- Topic configuration in DB (`kafka_topics`)
-- Message logs in DB (`kafka_consume_logs`)
-- Payload key exclusion
-- Payload-to-model field mapping
-- Configurable upsert key
-- Failed log retry scheduling metadata
+- Topic configuration in DB (`kafka_topics`) — no code deploys to add a topic
+- Per-message logs in DB (`kafka_consume_logs`) with partition/offset/key metadata
+- Payload-to-model field mapping with key exclusion
+- Configurable upsert key per topic
+- `BelongsToMany` relation syncing from nested payload arrays
+- Automatic retry scheduling with per-topic backoff and attempt limits
 - Re-consume command mode for failed messages
-- Consume metadata tracking (partition, offset, key)
+- Health status (`healthy` / `degraded` / `stalled` / `inactive`) from heartbeat + error state
+- `KafkaMessageConsumed` / `KafkaMessageFailed` events for alerting and metrics
 
 ## Requirements
 
-- PHP 8.2+
-- Laravel 11 or 12
-- Kafka broker access
-- `rdkafka` extension configured for your PHP runtime
+| Dependency | Version |
+|---|---|
+| PHP | 8.2+ |
+| Laravel | 11 / 12 |
+| ext-rdkafka | configured for your PHP runtime |
+| Kafka broker | reachable from the app |
 
 ## Installation
 
@@ -39,54 +48,51 @@ php artisan vendor:publish --tag=kafka-consumer-migrations
 php artisan migrate
 ```
 
-## What Gets Installed
+This creates two tables:
 
-After migration:
-
-- `kafka_topics` table: topic config + counters + health metadata
-- `kafka_consume_logs` table: per-message processing logs
+- `kafka_topics` — topic config, counters, and health metadata
+- `kafka_consume_logs` — per-message processing logs
 
 ## Quick Start
 
-1. Create a topic configuration.
-2. Start consumer:
+1. Create a topic configuration (via seeder, tinker, or the Filament UI).
+2. Start the consumer:
 
-```bash
-php artisan gurento:kafka-consume
-```
+   ```bash
+   php artisan gurento:kafka-consume
+   ```
 
-3. Inspect results in:
-- `kafka_topics.messages_consumed`
-- `kafka_consume_logs`
+3. Inspect results in `kafka_topics.messages_consumed` and `kafka_consume_logs`.
 
-## Topic Configuration Model
+## Topic Configuration
 
 Each `kafka_topics` row defines how a Kafka topic maps into your model.
 
-Core columns:
+**Core columns:**
 
-- `topic`: Kafka topic name
-- `model_class`: Fully-qualified model class (example: `App\\Models\\Office`)
-- `upsert_key`: Unique model column used by `updateOrCreate`
-- `field_map`: JSON array of mapping pairs (`from` payload field, `to` model field)
-- `exclude_keys`: Optional payload keys to ignore
-- `is_active`: whether topic is consumed
+| Column | Purpose |
+|---|---|
+| `topic` | Kafka topic name |
+| `model_class` | Fully-qualified model class (e.g. `App\Models\Office`) |
+| `upsert_key` | Unique model column used by `updateOrCreate` |
+| `field_map` | JSON array of `{from, to}` mapping pairs |
+| `exclude_keys` | Optional payload keys to strip before mapping |
+| `relations` | Optional `BelongsToMany` sync definitions |
+| `is_active` | Whether the topic is consumed |
 
-Operational columns (auto-managed):
+**Retry/health overrides** (fall back to config when `NULL`): `max_reconsume_attempts`, `retry_backoff_seconds`, `health_stale_after_seconds`.
 
-- `messages_consumed`, `messages_failed`, `messages_reconsumed`
-- `last_consumed_at`, `consumer_last_heartbeat_at`
-- `consumer_last_error`, `consumer_lag_seconds`
+**Operational columns** (auto-managed): `messages_consumed`, `messages_failed`, `messages_reconsumed`, `last_consumed_at`, `consumer_last_heartbeat_at`, `consumer_last_error`, `consumer_lag_seconds`.
 
-## Field Mapping Example
+### Field Mapping Example
 
-If Kafka payload is:
+Given this Kafka payload:
 
 ```json
 {
   "uuid": "off-001",
   "name": "Accounting Office",
-  "meta": {"source":"hr"}
+  "meta": {"source": "hr"}
 }
 ```
 
@@ -115,20 +121,20 @@ The package upserts by `upsert_key` (for example `id`).
 php artisan gurento:kafka-consume
 ```
 
-Options:
-
-- `--topics=*` consume only selected topics
-- `--limit=` process only N messages then stop
-- `--group=` consumer group id (defaults to `kafka-consumer.default_group` config)
-- `--from-beginning` read from earliest offsets (replay mode)
-- `--stop-on-empty` stop after the last available message instead of polling forever
+| Option | Description |
+|---|---|
+| `--topics=*` | Consume only selected topics |
+| `--limit=` | Process only N messages, then stop |
+| `--group=` | Consumer group id (defaults to `kafka-consumer.default_group` config) |
+| `--from-beginning` | Read from earliest offsets (replay mode) |
+| `--stop-on-empty` | Stop after the last available message instead of polling forever |
 
 Examples:
 
 ```bash
 php artisan gurento:kafka-consume --topics=HR_APP.LIVE.office
 php artisan gurento:kafka-consume --topics=HR_APP.LIVE.office --limit=500
-php artisan gurento:kafka-consume --from-beginning
+php artisan gurento:kafka-consume --from-beginning --stop-on-empty
 ```
 
 ### Re-consume Failed Logs
@@ -139,43 +145,54 @@ Instead of polling Kafka, reprocess failed entries from `kafka_consume_logs`:
 php artisan gurento:kafka-consume --reconsume-failed --reconsume-limit=100
 ```
 
-Useful after fixing:
-
-- wrong `field_map`
-- wrong `model_class`
-- temporary DB/infrastructure failures
+Useful after fixing a wrong `field_map`, a wrong `model_class`, or a temporary DB/infrastructure failure.
 
 ## How Replay Works
 
-`--from-beginning` sets offset reset to `earliest` and uses a unique consumer group (unless provided) to avoid corrupting your normal consumer offsets.
+`--from-beginning` sets offset reset to `earliest` and uses a unique consumer group (unless `--group` is provided) to avoid corrupting your normal consumer offsets.
 
 Recommended pattern:
 
-1. Run normal consumer with stable group for real-time operations.
+1. Run the normal consumer with a stable group for real-time operations.
 2. Use `--from-beginning` only for backfills/replays.
 
-## Failure and Retry Behavior
+## Failure & Retry Behavior
 
-On processing errors, package logs:
+On processing errors, the package logs `status=failed`, the `error` message, and retry metadata (`attempt_count`, `next_retry_at`, `retryable`). Retries back off linearly per attempt using the topic's `retry_backoff_seconds` and stop after `max_reconsume_attempts`. Re-consume mode marks replayed entries `reconsumed_success` on success.
 
-- `status=failed`
-- `error`
-- retry metadata (`attempt_count`, `next_retry_at`, `retryable`)
+## Configuration
 
-Re-consume mode updates status to `reconsumed_success` when replay succeeds.
+Values in `config/kafka-consumer.php` act as fallbacks when a topic row leaves the matching column `NULL`:
 
-## Plug-and-Play Engine
+| Key | Default | Purpose |
+|---|---|---|
+| `default_group` | `app-consumer` | Consumer group id when `--group` is not passed |
+| `max_reconsume_attempts` | `3` | Retry attempts before a failure becomes permanent |
+| `retry_backoff_seconds` | `60` | Base backoff between retries |
+| `health_stale_after_seconds` | `300` | Heartbeat age before a topic is considered stalled |
 
-By default, package auto-binds:
+## Events
 
-- `Gurento\\KafkaConsumer\\Contracts\\ConsumerEngine`
-- to `Gurento\\KafkaConsumer\\Engines\\LaravelKafkaConsumerEngine`
+The service dispatches events on every processing outcome — hook them for alerting or metrics:
 
-No host-app binding is required for standard usage.
+| Event | When | Payload |
+|---|---|---|
+| `Gurento\KafkaConsumer\Events\KafkaMessageConsumed` | Message (or re-consume) succeeds | `$topic`, `$log`, `$isReconsume` |
+| `Gurento\KafkaConsumer\Events\KafkaMessageFailed` | Processing fails | `$topic`, `$log`, `$error`, `$willRetry` |
+
+```php
+use Gurento\KafkaConsumer\Events\KafkaMessageFailed;
+
+Event::listen(KafkaMessageFailed::class, function (KafkaMessageFailed $event): void {
+    if (! $event->willRetry) {
+        // permanent failure — alert your on-call channel
+    }
+});
+```
 
 ## Custom Engine (Optional)
 
-If you need a different transport implementation, override binding in host app:
+By default the package binds `Gurento\KafkaConsumer\Contracts\ConsumerEngine` to `LaravelKafkaConsumerEngine`. To use a different transport, override the binding in your host app:
 
 ```php
 $this->app->singleton(
@@ -190,20 +207,6 @@ Your engine must implement:
 public function consume(array $topics, callable $handler, array $options = []): void;
 ```
 
-## Configuration Defaults
-
-Values in `config/kafka-consumer.php` act as fallbacks when a topic row leaves the matching column `NULL`:
-
-- `default_group` — consumer group id used when `--group` is not passed
-- `max_reconsume_attempts`, `retry_backoff_seconds`, `health_stale_after_seconds` — per-topic retry/health defaults
-
-## Events
-
-The service dispatches events you can listen to for alerting or metrics:
-
-- `Gurento\KafkaConsumer\Events\KafkaMessageConsumed` — after a message (or re-consume) succeeds; carries `$topic`, `$log`, `$isReconsume`
-- `Gurento\KafkaConsumer\Events\KafkaMessageFailed` — after a processing failure; carries `$topic`, `$log`, `$error`, `$willRetry`
-
 ## Programmatic Consumption Hook
 
 If you already consume Kafka elsewhere, call the service directly:
@@ -215,47 +218,26 @@ app(\Gurento\KafkaConsumer\Services\KafkaConsumerService::class)
 
 ## Production Recommendations
 
-- Run consumer as a daemon (Supervisor/systemd)
-- Monitor `messages_failed` and `consumer_last_error`
+- Run the consumer as a daemon (Supervisor/systemd)
+- Monitor `messages_failed` and `consumer_last_error` (or listen to `KafkaMessageFailed`)
 - Use separate groups for replay/backfill jobs
 - Keep `field_map` explicit and reviewed
 - Keep topic configs in source-controlled seeders where possible
 
 ## Troubleshooting
 
-### `No active topics configured`
+**`No active topics configured`** — ensure `kafka_topics` has rows with `is_active = true`.
 
-Make sure `kafka_topics` has rows with `is_active = true`.
+**Command not behaving as expected** — run `php artisan optimize:clear && composer dump-autoload`.
 
-### Command exists but not working as expected
+**Kafka connection/auth issues** — verify the host app's `config/kafka.php` and environment values (`KAFKA_BROKERS`, auth settings).
 
-Run:
+**Replay not processing failed logs** — check that rows have `status = failed`, `retryable = true`, and `next_retry_at <= now()` (or `NULL`).
 
-```bash
-php artisan optimize:clear
-composer dump-autoload
-```
+## Changelog
 
-### Kafka connection/auth issues
-
-Verify host app `config/kafka.php` and environment values (`KAFKA_BROKERS`, auth settings).
-
-### Replay not processing any failed logs
-
-Check failed log rows:
-
-- `status = failed`
-- `retryable = true`
-- `next_retry_at <= now()` (or `NULL`)
-
-## Filament UI Integration
-
-Install companion package for admin UI:
-
-- `gurento/kafka-consumer-filament`
-
-See its README for plugin registration and panel setup.
+See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## License
 
-MIT
+The MIT License (MIT). See [LICENSE](LICENSE) for details.
