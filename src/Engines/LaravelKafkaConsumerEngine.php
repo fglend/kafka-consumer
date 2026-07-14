@@ -24,7 +24,9 @@ class LaravelKafkaConsumerEngine implements ConsumerEngine
         $offsetReset = (string) ($options['offset_reset'] ?? ($fromBeginning ? 'earliest' : 'latest'));
         $limit = max(0, (int) ($options['limit'] ?? 0));
         $stopOnEmpty = (bool) ($options['stop_on_empty'] ?? false);
-        $groupId = (string) ($options['group'] ?? config('kafka.consumer_group_id', 'kafka-consumer'));
+        $groupId = (string) ($options['group']
+            ?? config('kafka-consumer.default_group')
+            ?? config('kafka.consumer_group_id', 'kafka-consumer'));
 
         // Avoid polluting production offsets if explicitly replaying from earliest.
         if ($fromBeginning && empty($options['group'])) {

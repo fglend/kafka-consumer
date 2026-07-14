@@ -12,7 +12,9 @@ class ConsumeKafkaCommand extends Command
     protected $signature = 'gurento:kafka-consume
         {--topics=* : Topic names to consume}
         {--limit=0 : Max messages for this run}
+        {--group= : Consumer group id (defaults to kafka-consumer.default_group)}
         {--from-beginning : Start from earliest offsets}
+        {--stop-on-empty : Stop after the last available message instead of polling forever}
         {--reconsume-failed : Retry failed logs instead of polling brokers}
         {--reconsume-limit=50 : Max failed logs per topic to retry}';
 
@@ -68,11 +70,13 @@ class ConsumeKafkaCommand extends Command
             function (string $topicName, array $payload, array $metadata = []) use ($service): void {
                 $service->handle($topicName, $payload, $metadata);
             },
-            [
+            array_filter([
                 'from_beginning' => $fromBeginning,
                 'offset_reset' => $fromBeginning ? 'earliest' : 'latest',
                 'limit' => $limit,
-            ]
+                'group' => $this->option('group'),
+                'stop_on_empty' => (bool) $this->option('stop-on-empty'),
+            ], fn ($value) => $value !== null)
         );
 
         return self::SUCCESS;

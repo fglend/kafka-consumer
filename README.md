@@ -119,7 +119,9 @@ Options:
 
 - `--topics=*` consume only selected topics
 - `--limit=` process only N messages then stop
+- `--group=` consumer group id (defaults to `kafka-consumer.default_group` config)
 - `--from-beginning` read from earliest offsets (replay mode)
+- `--stop-on-empty` stop after the last available message instead of polling forever
 
 Examples:
 
@@ -187,6 +189,20 @@ Your engine must implement:
 ```php
 public function consume(array $topics, callable $handler, array $options = []): void;
 ```
+
+## Configuration Defaults
+
+Values in `config/kafka-consumer.php` act as fallbacks when a topic row leaves the matching column `NULL`:
+
+- `default_group` — consumer group id used when `--group` is not passed
+- `max_reconsume_attempts`, `retry_backoff_seconds`, `health_stale_after_seconds` — per-topic retry/health defaults
+
+## Events
+
+The service dispatches events you can listen to for alerting or metrics:
+
+- `Gurento\KafkaConsumer\Events\KafkaMessageConsumed` — after a message (or re-consume) succeeds; carries `$topic`, `$log`, `$isReconsume`
+- `Gurento\KafkaConsumer\Events\KafkaMessageFailed` — after a processing failure; carries `$topic`, `$log`, `$error`, `$willRetry`
 
 ## Programmatic Consumption Hook
 

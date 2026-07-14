@@ -87,7 +87,8 @@ class KafkaTopic extends Model
             return 'unknown';
         }
 
-        $staleAfterSeconds = max(30, (int) ($this->health_stale_after_seconds ?? 300));
+        $staleAfterSeconds = max(30, (int) ($this->health_stale_after_seconds
+            ?? config('kafka-consumer.health_stale_after_seconds', 300)));
         $isStale = $this->consumer_last_heartbeat_at->lt(now()->subSeconds($staleAfterSeconds));
 
         if ($isStale) {

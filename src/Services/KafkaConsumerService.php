@@ -2,6 +2,8 @@
 
 namespace Gurento\KafkaConsumer\Services;
 
+use Gurento\KafkaConsumer\Events\KafkaMessageConsumed;
+use Gurento\KafkaConsumer\Events\KafkaMessageFailed;
 use Gurento\KafkaConsumer\Models\KafkaConsumeLog;
 use Gurento\KafkaConsumer\Models\KafkaTopic;
 use Illuminate\Database\Eloquent\Model;
@@ -97,7 +99,7 @@ class KafkaConsumerService
             $upsertValue = $this->processPayload($topicConfig, $payload);
             $this->markTopicSuccess($topicConfig, isReconsume: false);
 
-            return KafkaConsumeLog::create([
+            $log = KafkaConsumeLog::create([
                 'kafka_topic_id' => $topicConfig->id,
                 'status' => self::STATUS_SUCCESS,
                 'attempt_count' => 1,
@@ -110,6 +112,10 @@ class KafkaConsumerService
                 'kafka_offset' => $metadata['kafka_offset'] ?? null,
                 'kafka_key' => isset($metadata['kafka_key']) ? (string) $metadata['kafka_key'] : null,
             ]);
+
+            KafkaMessageConsumed::dispatch($topicConfig, $log);
+
+            return $log;
         } catch (Throwable $e) {
             $retryable = $this->isRetryable(1, $topicConfig);
             $nextRetryAt = $this->resolveNextRetryAt($topicConfig, 1, $retryable);
@@ -120,7 +126,7 @@ class KafkaConsumerService
                 'payload' => $payload,
             ]);
 
-            return KafkaConsumeLog::create([
+            $log = KafkaConsumeLog::create([
                 'kafka_topic_id' => $topicConfig->id,
                 'status' => self::STATUS_FAILED,
                 'attempt_count' => 1,
@@ -135,6 +141,10 @@ class KafkaConsumerService
                 'kafka_offset' => $metadata['kafka_offset'] ?? null,
                 'kafka_key' => isset($metadata['kafka_key']) ? (string) $metadata['kafka_key'] : null,
             ]);
+
+            KafkaMessageFailed::dispatch($topicConfig, $log, $e->getMessage(), $retryable);
+
+            return $log;
         }
     }
 
@@ -168,6 +178,8 @@ class KafkaConsumerService
                 'resolved_at' => now(),
             ]);
 
+            KafkaMessageConsumed::dispatch($topic, $failedLog, true);
+
             return true;
         } catch (Throwable $e) {
             $retryable = $this->isRetryable($attempt, $topic);
@@ -183,6 +195,8 @@ class KafkaConsumerService
             ]);
 
             Log::warning("KafkaConsumer: re-consume failed [{$topic->topic}] log={$failedLog->id}: {$e->getMessage()}");
+
+            KafkaMessageFailed::dispatch($topic, $failedLog, $e->getMessage(), $retryable);
 
             return false;
         }
@@ -342,7 +356,8 @@ class KafkaConsumerService
 
     private function isRetryable(int $attemptCount, KafkaTopic $topic): bool
     {
-        $maxAttempts = max(1, (int) ($topic->max_reconsume_attempts ?? 3));
+        $maxAttempts = max(1, (int) ($topic->max_reconsume_attempts
+            ?? config('kafka-consumer.max_reconsume_attempts', 3)));
 
         return $attemptCount < $maxAttempts;
     }
@@ -353,7 +368,8 @@ class KafkaConsumerService
             return null;
         }
 
-        $backoffSeconds = max(5, (int) ($topic->retry_backoff_seconds ?? 60));
+        $backoffSeconds = max(5, (int) ($topic->retry_backoff_seconds
+            ?? config('kafka-consumer.retry_backoff_seconds', 60)));
         $delay = $backoffSeconds * max(1, $attemptCount - 1);
 
         return now()->addSeconds($delay);
