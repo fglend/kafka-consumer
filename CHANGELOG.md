@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.1 - 2026-07-17
+
+- Laravel 13 support: `illuminate/*` constraints widened to `^11.0|^12.0|^13.0` (Laravel 13 requires PHP 8.3+, enforced by the framework)
+- Dev: orchestra/testbench `^11.0` and phpunit `^12.0` allowed
+
 ## 1.1.0 - 2026-07-14
 
 - `--group=` and `--stop-on-empty` options on `gurento:kafka-consume`

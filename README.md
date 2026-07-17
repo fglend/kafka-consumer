@@ -35,7 +35,7 @@ Ships with a default engine based on [`mateusjunges/laravel-kafka`](https://gith
 | Dependency | Version |
 |---|---|
 | PHP | 8.2+ |
-| Laravel | 11 / 12 |
+| Laravel | 11 / 12 / 13 |
 | ext-rdkafka | configured for your PHP runtime |
 | Kafka broker | reachable from the app |
 
