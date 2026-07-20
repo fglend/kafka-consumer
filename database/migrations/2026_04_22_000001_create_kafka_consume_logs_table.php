@@ -7,6 +7,10 @@ use Illuminate\Support\Facades\Schema;
 return new class extends Migration {
     public function up(): void
     {
+        if (Schema::hasTable('kafka_consume_logs')) {
+            return;
+        }
+
         Schema::create('kafka_consume_logs', function (Blueprint $table) {
             $table->id();
             $table->foreignId('kafka_topic_id')->constrained('kafka_topics')->cascadeOnDelete();

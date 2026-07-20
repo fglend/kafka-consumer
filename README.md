@@ -16,9 +16,11 @@ Built for operations teams that need:
 
 Ships with a default engine based on [`mateusjunges/laravel-kafka`](https://github.com/mateusjunges/laravel-kafka), so it works out of the box.
 
-> **Admin UI available:** install [`gurento/kafka-consumer-filament`](https://packagist.org/packages/gurento/kafka-consumer-filament) for a full Filament panel — topic CRUD, live health monitoring, and one-click replay.
+> **Admin UI available:** install [`gurento/kafka-consumer-filament`](https://packagist.org/packages/gurento/kafka-consumer-filament) for consumer topic CRUD, live health monitoring, and one-click replay — and/or [`gurento/kafka-producer-filament`](https://packagist.org/packages/gurento/kafka-producer-filament) for producer topic CRUD and a Send Message composer. Both are independent Filament panels sharing this package as their backend; install either or both.
 
 ## Features
+
+**Consumer**
 
 - Topic configuration in DB (`kafka_topics`) — no code deploys to add a topic
 - Per-message logs in DB (`kafka_consume_logs`) with partition/offset/key metadata
@@ -29,6 +31,14 @@ Ships with a default engine based on [`mateusjunges/laravel-kafka`](https://gith
 - Re-consume command mode for failed messages
 - Health status (`healthy` / `degraded` / `stalled` / `inactive`) from heartbeat + error state
 - `KafkaMessageConsumed` / `KafkaMessageFailed` events for alerting and metrics
+
+**Producer**
+
+- Producer topic configuration in DB (`kafka_producer_topics`) — key field, default headers, optional payload schema
+- Per-message send logs in DB (`kafka_produce_logs`)
+- Send ad-hoc messages programmatically, via command, or from the Filament UI
+- Automatic retry scheduling with per-topic backoff and attempt limits (mirrors the consumer side)
+- `KafkaMessageProduced` / `KafkaMessageProduceFailed` events for alerting and metrics
 
 ## Requirements
 
@@ -48,10 +58,12 @@ php artisan vendor:publish --tag=kafka-consumer-migrations
 php artisan migrate
 ```
 
-This creates two tables:
+This creates four tables:
 
-- `kafka_topics` — topic config, counters, and health metadata
-- `kafka_consume_logs` — per-message processing logs
+- `kafka_topics` — consumer topic config, counters, and health metadata
+- `kafka_consume_logs` — per-message consume processing logs
+- `kafka_producer_topics` — producer topic config, counters, and health metadata
+- `kafka_produce_logs` — per-message send logs
 
 ### Environment
 
@@ -170,9 +182,67 @@ Recommended pattern:
 1. Run the normal consumer with a stable group for real-time operations.
 2. Use `--from-beginning` only for backfills/replays.
 
-## Failure & Retry Behavior
+## Failure & Retry Behavior (Consumer)
 
 On processing errors, the package logs `status=failed`, the `error` message, and retry metadata (`attempt_count`, `next_retry_at`, `retryable`). Retries back off linearly per attempt using the topic's `retry_backoff_seconds` and stop after `max_reconsume_attempts`. Re-consume mode marks replayed entries `reconsumed_success` on success.
+
+## Producing Messages
+
+The producer side is a mirror of the consumer: declarative topic config, per-message logs, and automatic retry — just in the opposite direction.
+
+### Producer Topic Configuration
+
+Each `kafka_producer_topics` row defines how a topic accepts outgoing messages.
+
+| Column | Purpose |
+|---|---|
+| `topic` | Kafka topic name to publish to |
+| `model_class` | Optional Eloquent model class — used only by `gurento/kafka-producer-filament`'s UI to auto-derive `payload_schema`/`relations`; has no effect on `send()` |
+| `key_field` | Payload field used as the Kafka message key when no explicit key is given |
+| `default_headers` | JSON array of `{name, value}` pairs merged into every message |
+| `payload_schema` | Optional JSON array of `{name, type, required}` field definitions (drives the Filament send composer) |
+| `payload_template` | Optional free-form raw JSON text — when set, takes priority over `payload_schema`/`relations` as the Filament send composer's default payload |
+| `relations` | Optional JSON array of `{relationship, type, related_model}` — informational only, surfaced in the Filament UI |
+| `is_active` | Whether the topic accepts sends |
+
+**Retry overrides** (fall back to `config('kafka-consumer.producer.*')` when `NULL`): `max_send_attempts`, `send_backoff_seconds`.
+
+**Operational columns** (auto-managed): `messages_produced`, `messages_send_failed`, `messages_resent`, `last_produced_at`, `producer_last_error`.
+
+### Sending a Message
+
+Programmatically:
+
+```php
+app(\Gurento\KafkaConsumer\Services\KafkaProducerService::class)
+    ->send('APP.LIVE.orders', ['uuid' => 'ord-001', 'status' => 'paid']);
+```
+
+Via command:
+
+```bash
+php artisan gurento:kafka-produce --topic=APP.LIVE.orders --payload='{"uuid":"ord-001","status":"paid"}'
+```
+
+| Option | Description |
+|---|---|
+| `--topic=` | Producer topic name to send to |
+| `--payload=` | Message payload as a JSON string |
+| `--key=` | Optional message key (overrides the topic's `key_field` resolution) |
+| `--retry-failed` | Retry failed produce logs instead of sending a new message |
+| `--retry-limit=` | Max failed logs per topic to retry (default 50) |
+
+Retry all topics' failed sends:
+
+```bash
+php artisan gurento:kafka-produce --retry-failed --retry-limit=100
+```
+
+### Failure & Retry Behavior (Producer)
+
+On send errors, the package logs `status=failed`, the `error` message, and retry metadata (`attempt_count`, `next_retry_at`, `retryable`) — backing off linearly per attempt using `send_backoff_seconds` and stopping after `max_send_attempts`. Retried entries are marked `resent_success` on success.
+
+> **At-least-once semantics:** if the broker acknowledgment is lost after actually receiving the message, a retry can produce a duplicate. Design consumers to be idempotent (e.g. upsert by a stable key) when replaying producer retries.
 
 ## Configuration
 
@@ -181,62 +251,90 @@ Values in `config/kafka-consumer.php` act as fallbacks when a topic row leaves t
 | Key | Default | Purpose |
 |---|---|---|
 | `default_group` | `app-consumer` | Consumer group id when `--group` is not passed |
-| `max_reconsume_attempts` | `3` | Retry attempts before a failure becomes permanent |
-| `retry_backoff_seconds` | `60` | Base backoff between retries |
+| `max_reconsume_attempts` | `3` | Consumer retry attempts before a failure becomes permanent |
+| `retry_backoff_seconds` | `60` | Consumer base backoff between retries |
 | `health_stale_after_seconds` | `300` | Heartbeat age before a topic is considered stalled |
+| `producer.max_send_attempts` | `3` | Producer retry attempts before a send failure becomes permanent |
+| `producer.send_backoff_seconds` | `60` | Producer base backoff between retries |
+| `producer.health_stale_after_seconds` | `300` | Reserved for future producer health checks |
 
 ## Events
 
-The service dispatches events on every processing outcome — hook them for alerting or metrics:
+The services dispatch events on every processing outcome — hook them for alerting or metrics:
 
 | Event | When | Payload |
 |---|---|---|
 | `Gurento\KafkaConsumer\Events\KafkaMessageConsumed` | Message (or re-consume) succeeds | `$topic`, `$log`, `$isReconsume` |
 | `Gurento\KafkaConsumer\Events\KafkaMessageFailed` | Processing fails | `$topic`, `$log`, `$error`, `$willRetry` |
+| `Gurento\KafkaConsumer\Events\KafkaMessageProduced` | Message (or resend) sends successfully | `$topic`, `$log`, `$isResend` |
+| `Gurento\KafkaConsumer\Events\KafkaMessageProduceFailed` | Send fails | `$topic`, `$log`, `$error`, `$willRetry` |
 
 ```php
 use Gurento\KafkaConsumer\Events\KafkaMessageFailed;
+use Gurento\KafkaConsumer\Events\KafkaMessageProduceFailed;
 
 Event::listen(KafkaMessageFailed::class, function (KafkaMessageFailed $event): void {
     if (! $event->willRetry) {
-        // permanent failure — alert your on-call channel
+        // permanent consume failure — alert your on-call channel
+    }
+});
+
+Event::listen(KafkaMessageProduceFailed::class, function (KafkaMessageProduceFailed $event): void {
+    if (! $event->willRetry) {
+        // permanent send failure — alert your on-call channel
     }
 });
 ```
 
 ## Custom Engine (Optional)
 
-By default the package binds `Gurento\KafkaConsumer\Contracts\ConsumerEngine` to `LaravelKafkaConsumerEngine`. To use a different transport, override the binding in your host app:
+By default the package binds:
+
+- `Gurento\KafkaConsumer\Contracts\ConsumerEngine` → `LaravelKafkaConsumerEngine`
+- `Gurento\KafkaConsumer\Contracts\ProducerEngine` → `LaravelKafkaProducerEngine`
+
+To use a different transport, override either binding in your host app:
 
 ```php
 $this->app->singleton(
     \Gurento\KafkaConsumer\Contracts\ConsumerEngine::class,
-    YourCustomEngine::class,
+    YourCustomConsumerEngine::class,
+);
+
+$this->app->singleton(
+    \Gurento\KafkaConsumer\Contracts\ProducerEngine::class,
+    YourCustomProducerEngine::class,
 );
 ```
 
-Your engine must implement:
+Your engines must implement:
 
 ```php
 public function consume(array $topics, callable $handler, array $options = []): void;
+
+public function publish(string $topic, array $payload, ?string $key = null, array $headers = []): void;
 ```
 
-## Programmatic Consumption Hook
+## Programmatic Hooks
 
-If you already consume Kafka elsewhere, call the service directly:
+If you already consume or produce Kafka messages elsewhere, call the services directly:
 
 ```php
 app(\Gurento\KafkaConsumer\Services\KafkaConsumerService::class)
     ->handle($topicName, $payload, $metadata);
+
+app(\Gurento\KafkaConsumer\Services\KafkaProducerService::class)
+    ->send($topicName, $payload, $key);
 ```
 
 ## Production Recommendations
 
 - Run the consumer as a daemon (Supervisor/systemd)
-- Monitor `messages_failed` and `consumer_last_error` (or listen to `KafkaMessageFailed`)
+- Monitor `messages_failed` / `messages_send_failed` and `*_last_error` (or listen to the `*Failed` events)
 - Use separate groups for replay/backfill jobs
 - Keep `field_map` explicit and reviewed
 - Keep topic configs in source-controlled seeders where possible
+- Schedule `gurento:kafka-produce --retry-failed` (e.g. every few minutes) if you don't retry sends immediately
 
 ## Troubleshooting
 
@@ -246,7 +344,9 @@ app(\Gurento\KafkaConsumer\Services\KafkaConsumerService::class)
 
 **Kafka connection/auth issues** — verify the host app's `config/kafka.php` and environment values (`KAFKA_BROKERS`, auth settings).
 
-**Replay not processing failed logs** — check that rows have `status = failed`, `retryable = true`, and `next_retry_at <= now()` (or `NULL`).
+**Replay not processing failed logs** — check that rows have `status = failed`, `retryable = true`, and `next_retry_at <= now()` (or `NULL`). Applies to both `kafka_consume_logs` and `kafka_produce_logs`.
+
+**Message not sent, no error shown** — confirm the producer topic row has `is_active = true`; inactive topics are silently skipped (logged as a warning) rather than erroring.
 
 ## Changelog
 

@@ -7,6 +7,10 @@ use Illuminate\Support\Facades\Schema;
 return new class extends Migration {
     public function up(): void
     {
+        if (Schema::hasTable('kafka_topics')) {
+            return;
+        }
+
         Schema::create('kafka_topics', function (Blueprint $table) {
             $table->id();
             $table->string('topic')->unique();

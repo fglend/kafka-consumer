@@ -5,4 +5,10 @@ return [
     'max_reconsume_attempts' => 3,
     'retry_backoff_seconds' => 60,
     'health_stale_after_seconds' => 300,
+
+    'producer' => [
+        'max_send_attempts' => 3,
+        'send_backoff_seconds' => 60,
+        'health_stale_after_seconds' => 300,
+    ],
 ];
