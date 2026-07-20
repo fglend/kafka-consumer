@@ -1,22 +1,34 @@
 # Changelog
 
-## Unreleased
+## 2.0.0 - 2026-07-21
 
-- `kafka_producer_topics` gains a third new nullable column, `payload_template` (raw `text`) — a free-form JSON template hand-editable in `gurento/kafka-producer-filament`'s UI; no runtime effect on `KafkaProducerService::send()`. Added via another safe, additive migration.
-- `kafka_producer_topics` gains two new nullable columns via a safe, additive migration: `model_class` (an optional Eloquent model used purely to auto-derive `payload_schema`/`relations` in `gurento/kafka-producer-filament`'s UI — no runtime effect on `KafkaProducerService::send()`) and `relations` (JSON, informational). `KafkaProducerTopic`'s `$fillable`/`casts()` updated to match.
-- Migrations are now idempotent: each `up()` checks `Schema::hasTable()` before creating its table and skips if it already exists. Safe to re-run `php artisan migrate` in environments where a table exists but isn't tracked in the `migrations` table (e.g. after re-publishing migrations), without needing `migrate:fresh` or manual DB surgery.
+**Major release: full producer (send) support alongside the existing consumer.** The package now covers both directions of Kafka messaging with matching architecture, retry semantics, and observability on each side.
 
-## 1.3.0 - 2026-07-20
+### Added — Producer core
 
-- **Producer side added** — the package now supports publishing messages, not just consuming them:
-  - `Contracts\ProducerEngine` + default `Engines\LaravelKafkaProducerEngine` (based on `mateusjunges/laravel-kafka`), bound as a singleton
-  - New tables `kafka_producer_topics` and `kafka_produce_logs` (published via the existing `kafka-consumer-migrations` tag)
-  - `Models\KafkaProducerTopic` / `Models\KafkaProduceLog` with `health_status`, `failure_rate`, and `pendingRetryCount()` mirroring the consumer models
-  - `Services\KafkaProducerService::send()` / `retryFailedMessages()` / `retryLog()` with the same retry/backoff semantics as the consumer service
-  - `gurento:kafka-produce` command — ad-hoc sends (`--topic`, `--payload`, `--key`) and failed-send retries (`--retry-failed`, `--retry-limit`)
-  - Events `KafkaMessageProduced` / `KafkaMessageProduceFailed`
-  - Actions `RetryKafkaProduceFailuresAction` / `ResetKafkaProducerCountersAction`
-  - New `producer` config section (`max_send_attempts`, `send_backoff_seconds`, `health_stale_after_seconds`)
+- `Contracts\ProducerEngine` + default `Engines\LaravelKafkaProducerEngine` (based on `mateusjunges/laravel-kafka`), bound as a singleton alongside the existing `ConsumerEngine`
+- New tables `kafka_producer_topics` and `kafka_produce_logs` (published via the existing `kafka-consumer-migrations` tag)
+- `Models\KafkaProducerTopic` / `Models\KafkaProduceLog` with `health_status`, `failure_rate`, and `pendingRetryCount()` mirroring the consumer-side models
+- `Services\KafkaProducerService::send()` / `retryFailedMessages()` / `retryLog()` with the same retry/backoff semantics as the consumer service
+- `gurento:kafka-produce` command — ad-hoc sends (`--topic`, `--payload`, `--key`) and failed-send retries (`--retry-failed`, `--retry-limit`)
+- Events `KafkaMessageProduced` / `KafkaMessageProduceFailed`
+- Actions `RetryKafkaProduceFailuresAction` / `ResetKafkaProducerCountersAction`
+- New `producer` config section (`max_send_attempts`, `send_backoff_seconds`, `health_stale_after_seconds`)
+
+### Added — Dynamic producer schema (for `gurento/kafka-producer-filament`)
+
+- `kafka_producer_topics.model_class` — optional Eloquent model used only by the Filament UI to auto-derive a payload schema and detected relationships; no runtime effect on `send()`
+- `kafka_producer_topics.relations` (JSON) — informational relationship metadata surfaced in the UI
+- `kafka_producer_topics.payload_template` (raw `text`) — a free-form JSON template hand-editable in the Filament UI; when set, it's what the Send Message composer pre-fills, ahead of building one from `payload_schema`/`relations`
+- `KafkaProducerTopic`'s `$fillable`/`casts()` updated to match all three new columns
+
+### Changed
+
+- Migrations are now idempotent: every `up()` checks `Schema::hasTable()` (and, for the add-column migrations, `Schema::hasColumn()`) before making changes, skipping cleanly if already applied. Safe to re-run `php artisan migrate` in environments where a table exists but isn't tracked in the `migrations` table (e.g. after re-publishing migrations), without needing `migrate:fresh` or manual DB surgery.
+
+### Compatibility
+
+- All changes are additive — existing consumer-side behavior, config, and events are unchanged. No breaking changes to the public API; the major version bump reflects the scope of the new producer capability, not a compatibility break.
 
 ## 1.2.3 - 2026-07-17
 
